@@ -1,275 +1,348 @@
 (() => {
-  if (window.__ANIM_LOADED__) return;
-  window.__ANIM_LOADED__ = true;
+  if (window.__DOM_PROPS_PATCHED__) return;
+  window.__DOM_PROPS_PATCHED__ = true;
 
-  // =========================================================================
-  // ПРЕСЕТЫ КРИВЫХ (МОЖНО ДОБАВЛЯТЬ СВОИ)
-  // =========================================================================
-  window.ANIM_EASINGS = {
-    'linear':    [0.0, 0.0, 1.0, 1.0],
-    'ease':      [0.25, 0.1, 0.25, 1.0],
-    'in':        [0.4, 0.0, 1.0, 1.0],
-    'out':       [0.0, 0.0, 0.2, 1.0],
-    'in-out':    [0.4, 0.0, 0.2, 1.0],
-    'spring':    [0.34, 1.56, 0.64, 1.0],
-    'tactile':   [0.25, 1.0, 0.5, 1.0]
-  };
-  // =========================================================================
-
-  const createBezier = (x1, y1, x2, y2) => {
-    const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
-    const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
-    const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
-    const sampleY = (t) => ((ay * t + by) * t + cy) * t;
-    const sampleDerivX = (t) => (3 * ax * t + 2 * bx) * t + cx;
-
-    return (x) => {
-      if (x <= 0) return 0;
-      if (x >= 1) return 1;
-      let t = x;
-      for (let i = 0; i < 6; i++) {
-        const dx = sampleX(t) - x;
-        if (Math.abs(dx) < 1e-5) break;
-        const d = sampleDerivX(t);
-        if (Math.abs(d) < 1e-6) break;
-        t -= dx / d;
-      }
-      return sampleY(Math.max(0, Math.min(1, t)));
-    };
+  // 0. Базовый генератор элементов и глобальный адресный реестр
+  window.OBJ = {};
+  window.$ = window.$ || {
+    div: (cfg) => document.createElement('div'),
+    span: (cfg) => document.createElement('span'),
+    p: (cfg) => document.createElement('p'),
+    button: (cfg) => document.createElement('button'),
+    img: (cfg) => document.createElement('img'),
+    canvas: (cfg) => document.createElement('canvas'),
+    input: (cfg) => document.createElement('input'),
+    section: (cfg) => document.createElement('section')
   };
 
-  const resolveEasing = (easing) => {
-    if (typeof easing === 'function') return easing;
-    if (!easing) return createBezier(0.0, 0.0, 0.2, 1.0);
-    const str = String(easing).trim();
-    if (window.ANIM_EASINGS[str]) return createBezier(...window.ANIM_EASINGS[str]);
-    const match = str.match(/cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/i);
-    if (match) return createBezier(Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4]));
-    return createBezier(0.0, 0.0, 0.2, 1.0);
+  // 1. Глобальные метрики экрана
+  const updateViewport = () => {
+    window.W = window.innerWidth;
+    window.H = window.innerHeight;
+    window.centerX = window.W / 2;
+    window.centerY = window.H / 2;
   };
+  updateViewport();
+  window.addEventListener('resize', updateViewport);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', updateViewport);
 
-  const parseRGB = (val) => {
-    if (typeof val !== 'string') return null;
-    const s = val.trim();
-    if (s.startsWith('#')) {
-      let hex = s.slice(1);
-      if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
-      if (hex.length !== 6) return null;
-      const num = parseInt(hex, 16);
-      return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+  // 2. Инициализация состояния элемента
+  const getState = (el) => {
+    if (!el._tr) {
+      const st = el.style;
+      const initX = st.left && st.left.endsWith('px') ? parseFloat(st.left) || 0 : 0;
+      const initY = st.top  && st.top.endsWith('px')  ? parseFloat(st.top)  || 0 : 0;
+      const initW = st.width  && st.width.endsWith('px')  ? parseFloat(st.width)  : null;
+      const initH = st.height && st.height.endsWith('px') ? parseFloat(st.height) : null;
+
+      if (initX !== 0) st.left = '0px';
+      if (initY !== 0) st.top  = '0px';
+
+      el._tr = {
+        x: initX, y: initY,
+        anchorX: 0, anchorY: 0,
+        rotation: 0,
+        scaleX: 1, scaleY: 1,
+        w: initW, h: initH,
+        tex: '', shape: '', name: '',
+        gpu: false,
+        prevDisplay: st.display && st.display !== 'none' ? st.display : ''
+      };
+
+      if (initX !== 0 || initY !== 0) sync(el);
     }
-    const m = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    return el._tr;
   };
 
-  const resolveEl = (target) => typeof target === 'string' ? window.OBJ?.[target] : target;
+  const ensureAbsolute = (el) => {
+    const st = el.style;
+    if (!st.position) { st.position = 'absolute'; st.top = '0px'; st.left = '0px'; }
+  };
 
-  const ENGINE_PROPS = new Set([
-    'x', 'y', 'z', 'w', 'h', 'anchor', 'anchorX', 'anchorY',
-    'scale', 'scaleX', 'scaleY', 'rotation', 'alpha',
-    'color', 'textColor', 'radius', 'blur', 'backdrop', 'fontSize'
+  const readW = (el, s) => {
+    if (el.style.width && el.style.width.endsWith('px')) {
+      const fixedW = parseFloat(el.style.width) || 0;
+      s.w = fixedW;
+      return fixedW;
+    }
+    const val = el.offsetWidth || s.w || 0;
+    if (val > 0) s.w = val;
+    return val;
+  };
+
+  const readH = (el, s) => {
+    if (el.style.height && el.style.height.endsWith('px')) {
+      const fixedH = parseFloat(el.style.height) || 0;
+      s.h = fixedH;
+      return fixedH;
+    }
+    const val = el.offsetHeight || s.h || 0;
+    if (val > 0) s.h = val;
+    return val;
+  };
+
+  // Единая точка отрисовки
+  const sync = (el) => {
+    const s = getState(el);
+    ensureAbsolute(el);
+    const w = readW(el, s);
+    const h = readH(el, s);
+    const shiftX = s.x - w * s.anchorX;
+    const shiftY = s.y - h * s.anchorY;
+    const pos = s.gpu
+      ? `translate3d(${shiftX}px, ${shiftY}px, 0)`
+      : `translate(${shiftX}px, ${shiftY}px)`;
+    el.style.transformOrigin = `${s.anchorX * 100}% ${s.anchorY * 100}%`;
+    el.style.transform = `${pos} rotate(${s.rotation}deg) scale(${s.scaleX}, ${s.scaleY})`;
+  };
+
+  // 3. Реактивные свойства на каждом HTML-элементе
+  Object.defineProperties(HTMLElement.prototype, {
+    name: {
+      get() { return getState(this).name; },
+      set(v) {
+        const s = getState(this);
+        if (s.name && window.OBJ[s.name] === this) delete window.OBJ[s.name];
+        s.name = String(v || '');
+        if (s.name) window.OBJ[s.name] = this;
+      }
+    },
+    gpu:      { get() { return getState(this).gpu; },      set(v) { getState(this).gpu = Boolean(v); sync(this); } },
+    x:        { get() { return getState(this).x; },        set(v) { getState(this).x = Number(v) || 0; sync(this); } },
+    y:        { get() { return getState(this).y; },        set(v) { getState(this).y = Number(v) || 0; sync(this); } },
+    z:        { get() { return Number(this.style.zIndex) || 0; }, set(v) { this.style.zIndex = Math.round(Number(v) || 0); } },
+
+    anchorX:  { get() { return getState(this).anchorX; },  set(v) { getState(this).anchorX = Number(v) || 0; sync(this); } },
+    anchorY:  { get() { return getState(this).anchorY; },  set(v) { getState(this).anchorY = Number(v) || 0; sync(this); } },
+    anchor:   {
+      get() { return getState(this).anchorX; },
+      set(v) { const s = getState(this); s.anchorX = s.anchorY = Number(v) || 0; sync(this); }
+    },
+
+    rotation: { get() { return getState(this).rotation; }, set(v) { getState(this).rotation = Number(v) || 0; sync(this); } },
+    scaleX:   { get() { return getState(this).scaleX; },   set(v) { const n = Number(v); if (!Number.isNaN(n)) { getState(this).scaleX = n; sync(this); } } },
+    scaleY:   { get() { return getState(this).scaleY; },   set(v) { const n = Number(v); if (!Number.isNaN(n)) { getState(this).scaleY = n; sync(this); } } },
+    scale:    {
+      get() { return getState(this).scaleX; },
+      set(v) { const n = Number(v); if (!Number.isNaN(n)) { const s = getState(this); s.scaleX = s.scaleY = n; sync(this); } }
+    },
+
+    alpha:    { get() { return this.style.opacity === '' ? 1 : Number(this.style.opacity); }, set(v) { this.style.opacity = v; } },
+    visible:  {
+      get() { return this.style.display !== 'none'; },
+      set(v) {
+        const s = getState(this);
+        if (v) {
+          this.style.display = s.prevDisplay || '';
+          sync(this);
+        } else if (this.style.display !== 'none') {
+          s.prevDisplay = this.style.display;
+          this.style.display = 'none';
+        }
+      }
+    },
+    touch: {
+      get() { return this.style.pointerEvents !== 'none'; },
+      set(v) { this.style.pointerEvents = v ? 'auto' : 'none'; }
+    },
+
+    w: {
+      get() { return readW(this, getState(this)); },
+      set(v) { const n = Number(v) || 0; getState(this).w = n; this.style.width = n + 'px'; sync(this); }
+    },
+    h: {
+      get() { return readH(this, getState(this)); },
+      set(v) { const n = Number(v) || 0; getState(this).h = n; this.style.height = n + 'px'; sync(this); }
+    },
+
+    realW:    { get() { return this.w * Math.abs(getState(this).scaleX); } },
+    realH:    { get() { return this.h * Math.abs(getState(this).scaleY); } },
+
+    left:     { get() { return this.x - this.realW * getState(this).anchorX; } },
+    right:    { get() { return this.x + this.realW * (1 - getState(this).anchorX); } },
+    top:      { get() { return this.y - this.realH * getState(this).anchorY; } },
+    bottom:   { get() { return this.y + this.realH * (1 - getState(this).anchorY); } },
+    cx:       { get() { return this.left + this.realW / 2; } },
+    cy:       { get() { return this.top + this.realH / 2; } },
+
+    color:    { get() { return this.style.backgroundColor; }, set(v) { this.style.backgroundColor = v; } },
+    textColor:{ get() { return this.style.color; },           set(v) { this.style.color = v; } },
+    radius:   {
+      get() { return parseFloat(this.style.borderRadius) || 0; },
+      set(v) { this.style.borderRadius = typeof v === 'number' ? v + 'px' : v; }
+    },
+    shape: {
+      get() { return getState(this).shape; },
+      set(v) {
+        getState(this).shape = v || '';
+        this.style.clipPath = v || '';
+      }
+    },
+    blur: {
+      get() { return parseFloat(this.style.filter) || 0; },
+      set(v) { this.style.filter = typeof v === 'number' ? (v > 0 ? `blur(${v}px)` : '') : (v || ''); }
+    },
+    backdrop: {
+      get() { return parseFloat(this.style.backdropFilter) || 0; },
+      set(v) {
+        const val = typeof v === 'number' ? (v > 0 ? `blur(${v}px)` : '') : (v || '');
+        this.style.backdropFilter = val;
+        this.style.WebkitBackdropFilter = val;
+      }
+    },
+    fontSize: {
+      get() { return parseFloat(this.style.fontSize) || 16; },
+      set(v) {
+        ensureAbsolute(this);
+        this.style.fontSize = (typeof v === 'number' ? v + 'px' : v);
+        const s = getState(this);
+        if (!this.style.width) s.w = this.offsetWidth || null;
+        if (!this.style.height) s.h = this.offsetHeight || null;
+        sync(this);
+      }
+    },
+    text: {
+      get() { return this.textContent; },
+      set(v) {
+        const str = String(v ?? '');
+        if (this.textContent !== str) {
+          ensureAbsolute(this);
+          this.textContent = str;
+          const s = getState(this);
+          if (!this.style.width) s.w = this.offsetWidth || null;
+          if (!this.style.height) s.h = this.offsetHeight || null;
+          sync(this);
+        }
+      }
+    },
+    tex: {
+      get() { return getState(this).tex; },
+      set(key) {
+        getState(this).tex = key;
+        const src = (window.ASSETS && window.ASSETS[key]) || key;
+        if (this.tagName === 'IMG') {
+          this.onload = () => this.remeasure();
+          this.src = src;
+        } else {
+          this.style.backgroundImage = `url(${src})`;
+          if (!this.style.backgroundSize) this.style.backgroundSize = '100% 100%';
+          this.style.backgroundPosition = 'center';
+          this.style.backgroundRepeat = 'no-repeat';
+        }
+      }
+    },
+    fit: {
+      get() { return this.tagName === 'IMG' ? this.style.objectFit : this.style.backgroundSize; },
+      set(v) {
+        if (this.tagName === 'IMG') this.style.objectFit = v;
+        else this.style.backgroundSize = v === 'fill' ? '100% 100%' : v;
+      }
+    }
+  });
+
+  // 4. Встроенные методы
+  const origRemove = HTMLElement.prototype.remove;
+  HTMLElement.prototype.remove = function() {
+    const s = this._tr;
+    if (s && s.name && window.OBJ[s.name] === this) delete window.OBJ[s.name];
+    origRemove.call(this);
+  };
+
+  HTMLElement.prototype.move = function(x, y) {
+    const s = getState(this);
+    s.x = Number(x) || 0;
+    s.y = Number(y) || 0;
+    sync(this);
+    return this;
+  };
+
+  HTMLElement.prototype.remeasure = function() {
+    const s = getState(this);
+    s.w = this.offsetWidth || null;
+    s.h = this.offsetHeight || null;
+    sync(this);
+    return this;
+  };
+
+  HTMLElement.prototype.hit = function(other) {
+    if (!other || !this.visible || !other.visible) return false;
+    return this.left < other.right && this.right > other.left && this.top < other.bottom && this.bottom > other.top;
+  };
+
+  HTMLElement.prototype.dist = function(other) {
+    if (!other) return Infinity;
+    return Math.hypot(this.cx - other.cx, this.cy - other.cy);
+  };
+
+  // 5. Системные свойства движка, которые обрабатываются отдельно
+  const SYSTEM_KEYS = new Set([
+    'name', 'gpu', 'x', 'y', 'z', 'w', 'h', 'anchor', 'anchorX', 'anchorY', 
+    'scale', 'scaleX', 'scaleY', 'rotation', 'alpha', 'visible', 'touch', 
+    'color', 'textColor', 'radius', 'shape', 'blur', 'backdrop', 'fontSize', 
+    'text', 'tex', 'fit'
   ]);
 
-  const activeTweens = [];
-  let rafRunning = false;
-  let lastFrameTime = 0;
+  const patchDollar = () => {
+    if (window.$.__patched) return;
+    window.$.__patched = true;
+    ['div', 'span', 'p', 'button', 'img', 'canvas', 'input', 'section'].forEach(fnName => {
+      if (typeof window.$[fnName] !== 'function') return;
+      const orig = window.$[fnName].bind(window.$);
+      window.$[fnName] = (cfg = {}, ...rest) => {
+        const extra = {};
+        const cssProps = {};
 
-  const tick = (now) => {
-    // Защита от прыжка при сворачивании вкладки: максимум 64 мс за один кадр
-    const rawDt = lastFrameTime ? (now - lastFrameTime) : 16.67;
-    const dt = Math.min(rawDt, 64);
-    lastFrameTime = now;
-
-    for (let i = activeTweens.length - 1; i >= 0; i--) {
-      const tw = activeTweens[i];
-
-      if (!document.body.contains(tw.el)) {
-        activeTweens.splice(i, 1);
-        continue;
-      }
-
-      if (tw.paused) continue;
-
-      tw.elapsed += dt;
-      const rawProgress = tw.ms <= 0 ? 1 : Math.min(1, tw.elapsed / tw.ms);
-      const k = tw.easeFn(rawProgress);
-
-      if (tw.isColor) {
-        const r = Math.round(tw.from[0] + (tw.to[0] - tw.from[0]) * k);
-        const g = Math.round(tw.from[1] + (tw.to[1] - tw.from[1]) * k);
-        const b = Math.round(tw.from[2] + (tw.to[2] - tw.from[2]) * k);
-        if (tw.isSystem) {
-          tw.el[tw.prop] = `rgb(${r}, ${g}, ${b})`;
-        } else {
-          tw.el.style[tw.prop] = `rgb(${r}, ${g}, ${b})`;
+        // Гибридный разбор конфига: системные свойства отдельно, чистый CSS — в el.style
+        if (cfg && typeof cfg === 'object') {
+          for (const k in cfg) {
+            if (SYSTEM_KEYS.has(k)) {
+              extra[k] = cfg[k];
+            } else {
+              cssProps[k] = cfg[k];
+            }
+          }
         }
-      } else {
-        const current = tw.from + (tw.to - tw.from) * k;
-        if (tw.isSystem) {
-          // Округление до 2 знаков для fontSize убирает джиттер букв в DOM
-          tw.el[tw.prop] = tw.prop === 'fontSize' ? Math.round(current * 100) / 100 : current;
-        } else {
-          tw.el.style[tw.prop] = `${current}${tw.unit}`;
+
+        // Создаем элемент и сразу добавляем в DOM для корректного замера размеров
+        const el = orig({}, ...rest);
+        ensureAbsolute(el);
+        if (!el.parentNode) {
+          document.body.appendChild(el);
         }
-      }
 
-      if (rawProgress >= 1) {
-        if (tw.prop === 'fontSize') tw.el.fontSize = tw.to;
-        activeTweens.splice(i, 1);
-        if (tw.onComplete) tw.onComplete(tw.el);
-        if (tw.resolve) tw.resolve(tw.el);
-      }
-    }
+        const s = getState(el);
 
-    if (activeTweens.length > 0) {
-      requestAnimationFrame(tick);
-    } else {
-      rafRunning = false;
-      lastFrameTime = 0;
-    }
-  };
+        // Сначала применяем CSS-свойства (шрифт, переносы, отступы), чтобы замер их учитывал
+        for (const k in cssProps) {
+          el.style[k] = cssProps[k];
+        }
 
-  const ensureLoop = () => {
-    if (!rafRunning) {
-      rafRunning = true;
-      lastFrameTime = performance.now();
-      requestAnimationFrame(tick);
-    }
-  };
+        // Применяем системные свойства движка
+        if (extra.gpu !== undefined) s.gpu = Boolean(extra.gpu);
+        if (extra.x !== undefined) s.x = Number(extra.x) || 0;
+        if (extra.y !== undefined) s.y = Number(extra.y) || 0;
+        if (extra.anchor !== undefined) s.anchorX = s.anchorY = Number(extra.anchor) || 0;
+        if (extra.anchorX !== undefined) s.anchorX = Number(extra.anchorX) || 0;
+        if (extra.anchorY !== undefined) s.anchorY = Number(extra.anchorY) || 0;
+        if (extra.rotation !== undefined) s.rotation = Number(extra.rotation) || 0;
+        if (extra.scale !== undefined) s.scaleX = s.scaleY = Number(extra.scale);
+        if (extra.scaleX !== undefined) s.scaleX = Number(extra.scaleX);
+        if (extra.scaleY !== undefined) s.scaleY = Number(extra.scaleY);
 
-  const createSingleTween = (el, prop, rawVal, ms, easeFn, onComplete, resolve) => {
-    for (let i = activeTweens.length - 1; i >= 0; i--) {
-      if (activeTweens[i].el === el && activeTweens[i].prop === prop) {
-        activeTweens.splice(i, 1);
-      }
-    }
+        for (const k of ['name', 'w', 'h', 'z', 'alpha', 'visible', 'touch', 'color', 'textColor', 'radius', 'shape', 'blur', 'backdrop', 'fontSize', 'text', 'tex', 'fit']) {
+          if (extra[k] !== undefined) el[k] = extra[k];
+        }
 
-    const isSystem = ENGINE_PROPS.has(prop);
-    const isColorProp = prop === 'color' || prop === 'textColor' || prop === 'backgroundColor' || prop === 'borderColor';
+        if (extra.w === undefined && !el.style.width) s.w = null;
+        if (extra.h === undefined && !el.style.height) s.h = null;
 
-    const tweenData = {
-      el, prop, ms, easeFn, onComplete, resolve,
-      isSystem,
-      isColor: false,
-      from: 0,
-      to: 0,
-      unit: '',
-      elapsed: 0,
-      paused: false
-    };
+        sync(el);
 
-    if (isColorProp) {
-      const startColorStr = isSystem ? el[prop] : (el.style[prop] || getComputedStyle(el)[prop]);
-      const fromRGB = parseRGB(startColorStr) || [0, 0, 0];
-      const toRGB = parseRGB(String(rawVal));
-      if (!toRGB) return null;
-
-      tweenData.isColor = true;
-      tweenData.from = fromRGB;
-      tweenData.to = toRGB;
-    } else {
-      let currentNum = 0;
-      let detectedUnit = '';
-
-      if (isSystem) {
-        currentNum = Number(el[prop]);
-        if (Number.isNaN(currentNum)) currentNum = (prop.startsWith('scale') || prop === 'alpha') ? 1 : 0;
-      } else {
-        const rawCur = el.style[prop] || getComputedStyle(el)[prop] || '0';
-        currentNum = parseFloat(rawCur) || 0;
-        detectedUnit = String(rawCur).replace(/[-?0-9.]/g, '').trim();
-      }
-
-      const valStr = String(rawVal).trim();
-      let targetNum = 0;
-
-      if (valStr.startsWith('+=')) {
-        targetNum = currentNum + (parseFloat(valStr.slice(2)) || 0);
-      } else if (valStr.startsWith('-=')) {
-        targetNum = currentNum - (parseFloat(valStr.slice(2)) || 0);
-      } else {
-        targetNum = parseFloat(valStr);
-        if (Number.isNaN(targetNum)) targetNum = 0;
-      }
-
-      const explicitUnit = valStr.replace(/^[+-]=/, '').replace(/[-?0-9.]/g, '').trim();
-      tweenData.from = currentNum;
-      tweenData.to = targetNum;
-      tweenData.unit = isSystem ? '' : (explicitUnit || detectedUnit || 'px');
-    }
-
-    activeTweens.push(tweenData);
-    ensureLoop();
-    return tweenData;
-  };
-
-  // =========================================================================
-  // 1. ЗАПУСК:
-  //    anim(OBJ.el, { property: 'scale', value: 2, ms: 300, easing: 'spring' })
-  //    или мульти: anim(OBJ.el, { properties: { x: 200, alpha: 1 }, ms: 300 })
-  // =========================================================================
-  window.anim = function(target, opts = {}) {
-    const el = resolveEl(target);
-    if (!el) return Promise.resolve(null);
-
-    const ms = opts.ms !== undefined ? Number(opts.ms) : 250;
-    const easeFn = resolveEasing(opts.easing);
-    const onComplete = opts.onComplete || null;
-
-    // Режим нескольких свойств сразу: { properties: { x: 100, scale: 1.5 }, ms: 300 }
-    if (opts.properties && typeof opts.properties === 'object') {
-      const entries = Object.entries(opts.properties);
-      if (entries.length === 0) return Promise.resolve(el);
-
-      const promises = entries.map(([prop, val], idx) => {
-        const isLast = idx === entries.length - 1;
-        return new Promise((resolve) => {
-          const tw = createSingleTween(el, prop, val, ms, easeFn, isLast ? onComplete : null, resolve);
-          if (!tw) resolve(el);
-        });
-      });
-      return Promise.all(promises).then(() => el);
-    }
-
-    // Режим одного свойства: { property: 'scale', value: 2, ms: 300, easing: '...' }
-    if (!opts.property || opts.value === undefined) return Promise.resolve(el);
-
-    return new Promise((resolve) => {
-      const tw = createSingleTween(el, opts.property, opts.value, ms, easeFn, onComplete, resolve);
-      if (!tw) resolve(el);
+        return el;
+      };
     });
   };
 
-  // =========================================================================
-  // 2. ПАУЗА / ПРОДОЛЖЕНИЕ / ОТКЛЮЧЕНИЕ
-  // =========================================================================
-  window.anim.pause = function(target, property = null) {
-    const el = resolveEl(target);
-    if (!el) return;
-    activeTweens.forEach(tw => {
-      if (tw.el === el && (!property || tw.prop === property)) tw.paused = true;
-    });
-  };
-
-  window.anim.resume = function(target, property = null) {
-    const el = resolveEl(target);
-    if (!el) return;
-    activeTweens.forEach(tw => {
-      if (tw.el === el && (!property || tw.prop === property)) tw.paused = false;
-    });
-  };
-
-  window.anim.stop = function(target, property = null) {
-    const el = resolveEl(target);
-    if (!el) return;
-    for (let i = activeTweens.length - 1; i >= 0; i--) {
-      if (activeTweens[i].el === el && (!property || activeTweens[i].prop === property)) {
-        activeTweens.splice(i, 1);
-      }
-    }
-  };
-
-  window.anim.pauseAll  = () => activeTweens.forEach(tw => tw.paused = true);
-  window.anim.resumeAll = () => activeTweens.forEach(tw => tw.paused = false);
-  window.anim.stopAll   = () => activeTweens.length = 0;
+  // Немедленный патч без ожидания событий
+  patchDollar();
 })();
