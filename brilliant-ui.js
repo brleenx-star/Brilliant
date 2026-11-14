@@ -60,6 +60,16 @@
     el.style.transform = `${pos} rotate(${s.rotation}deg) scale(${s.scaleX},${s.scaleY}) translate(${ax}%,${ay}%)`;
   };
 
+  // Умный парсер размеров (поддерживает числа, auto, %, max-content и т.д.)
+  const parseSize = (v) => {
+    if (typeof v === 'number') return v + 'px';
+    if (typeof v === 'string') {
+      if (/^\d+(\.\d+)?$/.test(v)) return v + 'px'; // если строка из чистых цифр — добавляем px
+      return v; // ключевые слова (auto, max-content и т.д.) и строки с единицими (% , px) возвращаем как есть
+    }
+    return v;
+  };
+
   Object.defineProperties(HTMLElement.prototype, {
     name: {
       get() { return getState(this).name; },
@@ -110,11 +120,11 @@
 
     w: {
       get() { const s = getState(this); return s.w || this.offsetWidth; },
-      set(v) { getState(this).w = v; this.style.width = v + 'px'; }
+      set(v) { getState(this).w = v; this.style.width = parseSize(v); }
     },
     h: {
       get() { const s = getState(this); return s.h || this.offsetHeight; },
-      set(v) { getState(this).h = v; this.style.height = v + 'px'; }
+      set(v) { getState(this).h = v; this.style.height = parseSize(v); }
     },
 
     realW:    { get() { return this.w * Math.abs(getState(this).scaleX); } },
@@ -241,5 +251,5 @@
     });
   };
 
-  patchDollar();
+  patchDelegates = patchDollar();
 })();
