@@ -60,15 +60,23 @@
   };
 
   const readW = (el, s) => {
-    if (s.w !== null && s.w > 0) return s.w;
-    const val = (el.style.width && el.style.width.endsWith('px') ? parseFloat(el.style.width) : 0) || el.offsetWidth || 0;
+    if (el.style.width && el.style.width.endsWith('px')) {
+      const fixedW = parseFloat(el.style.width) || 0;
+      s.w = fixedW;
+      return fixedW;
+    }
+    const val = el.offsetWidth || s.w || 0;
     if (val > 0) s.w = val;
     return val;
   };
 
   const readH = (el, s) => {
-    if (s.h !== null && s.h > 0) return s.h;
-    const val = (el.style.height && el.style.height.endsWith('px') ? parseFloat(el.style.height) : 0) || el.offsetHeight || 0;
+    if (el.style.height && el.style.height.endsWith('px')) {
+      const fixedH = parseFloat(el.style.height) || 0;
+      s.h = fixedH;
+      return fixedH;
+    }
+    const val = el.offsetHeight || s.h || 0;
     if (val > 0) s.h = val;
     return val;
   };
@@ -126,6 +134,7 @@
         const s = getState(this);
         if (v) {
           this.style.display = s.prevDisplay || '';
+          sync(this);
         } else if (this.style.display !== 'none') {
           s.prevDisplay = this.style.display;
           this.style.display = 'none';
@@ -294,10 +303,19 @@
           }
         }
 
-        // Создаем чистый элемент через оригинальный метод
+        // Создаем элемент и сразу добавляем в DOM для корректного замера размеров
         const el = orig({}, ...rest);
         ensureAbsolute(el);
+        if (!el.parentNode) {
+          document.body.appendChild(el);
+        }
+
         const s = getState(el);
+
+        // Сначала применяем CSS-свойства (шрифт, переносы, отступы), чтобы замер их учитывал
+        for (const k in cssProps) {
+          el.style[k] = cssProps[k];
+        }
 
         // Применяем системные свойства движка
         if (extra.gpu !== undefined) s.gpu = Boolean(extra.gpu);
@@ -315,17 +333,6 @@
           if (extra[k] !== undefined) el[k] = extra[k];
         }
 
-        // Автоматически применяем любые переданные CSS-свойства прямо в el.style без вложенного объекта style
-        for (const k in cssProps) {
-          el.style[k] = cssProps[k];
-        }
-
-        // Сначала добавляем элемент в документ, чтобы браузер мог измерить его реальные размеры
-        if (!el.parentNode) {
-          document.body.appendChild(el);
-        }
-
-        // Если ширина или высота не заданы явно — перемеряем реальный размер в DOM перед финальной отрисовкой
         if (extra.w === undefined && !el.style.width) s.w = null;
         if (extra.h === undefined && !el.style.height) s.h = null;
 
