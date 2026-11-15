@@ -2,6 +2,11 @@
   if (window.__DOM_PROPS_PATCHED__) return;
   window.__DOM_PROPS_PATCHED__ = true;
 
+  // Глобальные CSS-ключевые слова для использования без кавычек (w: auto, fit: contain и т.д.)
+  ['auto', 'inherit', 'initial', 'unset', 'none', 'normal', 'contain', 'cover', 'fill'].forEach(kw => {
+    if (!(kw in window)) window[kw] = kw;
+  });
+
   window.OBJ = Object.create(null);
   const root = () => document.getElementById('app') || document.body;
 
@@ -60,14 +65,19 @@
     el.style.transform = `${pos} rotate(${s.rotation}deg) scale(${s.scaleX},${s.scaleY}) translate(${ax}%,${ay}%)`;
   };
 
-  // Умный парсер размеров (поддерживает числа, auto, %, max-content и т.д.)
-  const parseSize = (v) => {
-    if (typeof v === 'number') return v + 'px';
-    if (typeof v === 'string') {
-      if (/^\d+(\.\d+)?$/.test(v)) return v + 'px'; // если строка из чистых цифр — добавляем px
-      return v; // ключевые слова (auto, max-content и т.д.) и строки с единицими (% , px) возвращаем как есть
+  const applySize = (el, prop, stateKey, v) => {
+    const s = getState(el);
+    if (typeof v === 'number') {
+      s[stateKey] = v;
+      el.style[prop] = v + 'px';
+    } else if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v.trim())) {
+      const num = Number(v.trim());
+      s[stateKey] = num;
+      el.style[prop] = num + 'px';
+    } else {
+      s[stateKey] = 0;
+      el.style[prop] = v;
     }
-    return v;
   };
 
   Object.defineProperties(HTMLElement.prototype, {
@@ -120,11 +130,11 @@
 
     w: {
       get() { const s = getState(this); return s.w || this.offsetWidth; },
-      set(v) { getState(this).w = v; this.style.width = parseSize(v); }
+      set(v) { applySize(this, 'width', 'w', v); }
     },
     h: {
       get() { const s = getState(this); return s.h || this.offsetHeight; },
-      set(v) { getState(this).h = v; this.style.height = parseSize(v); }
+      set(v) { applySize(this, 'height', 'h', v); }
     },
 
     realW:    { get() { return this.w * Math.abs(getState(this).scaleX); } },
@@ -251,5 +261,5 @@
     });
   };
 
-  patchDelegates = patchDollar();
+  patchDollar();
 })();
